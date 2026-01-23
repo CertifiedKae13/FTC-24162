@@ -32,6 +32,11 @@ public class Limelight3a extends OpMode {
               telemetry.addData("Tx", llResult.getTx());
               telemetry.addData("Tu", llResult.getTy());
               telemetry.addData("Ta", llResult.getTa());
+              telemetry.addData("Botpose", llResult.getBotpose());
+              telemetry.addData("Yaw", botPose.getOrientation().getYaw());
+              telemetry.addData("x", botPose.getPosition().x);
+              telemetry.addData("y", botPose.getPosition().y);
+              telemetry.addData("z", botPose.getPosition().z);
           }
        }
 }
