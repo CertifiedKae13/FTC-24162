@@ -81,7 +81,7 @@ public class Turret {
     }
 
     public void addTelemetry(Telemetry telemetry) {
-        telemetry.addLine("── 操你妈 ──");
+        telemetry.addLine("── Turrent ──");
         telemetry.addData(" Mode", turretMode);
         telemetry.addData(" Auto", autoTrack ? "ON" : "off");
         telemetry.addData(" Tx", "%.2f°", lastTx);
