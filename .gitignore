@@ -1,0 +1,9 @@
+# Gradle / Android / FTC build outputs and caches
+.gradle/
+**/build/
+*.iml
+.idea/
+local.properties
+.DS_Store
+*.apk
+*.aar
