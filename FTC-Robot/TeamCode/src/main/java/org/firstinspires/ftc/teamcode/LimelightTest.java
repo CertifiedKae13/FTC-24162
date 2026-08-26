@@ -44,11 +44,14 @@ public class LimelightTest extends OpMode {
     @Override
     public void init() {
         enableBulkReads();
-        voltageSensor = hardwareMap.voltageSensor.iterator().next();
+
+        if (hardwareMap.voltageSensor.iterator().hasNext()) {
+            voltageSensor = hardwareMap.voltageSensor.iterator().next();
+        }
 
         drivetrain = new Drivetrain(hardwareMap);
 
-        telemetry.addLine("✓ All systems initialized");
+        telemetry.addLine("✓ Drivetrain initialized");
         telemetry.update();
     }
 
@@ -72,13 +75,28 @@ public class LimelightTest extends OpMode {
         loopTimer.reset();
 
         snapshotGamepad();
-        batteryVoltage = Math.max(voltageSensor.getVoltage(), MIN_VOLTAGE);
-        double voltageScale = NOMINAL_VOLTAGE / batteryVoltage;
+
+        if (voltageSensor != null) {
+            batteryVoltage = Math.max(
+                    voltageSensor.getVoltage(),
+                    MIN_VOLTAGE
+            );
+        } else {
+            batteryVoltage = NOMINAL_VOLTAGE;
+        }
+
+        double voltageScale =
+                NOMINAL_VOLTAGE / batteryVoltage;
 
         drivetrain.update(currGP, voltageScale);
 
         emitTelemetry(dt);
         telemetry.update();
+    }
+
+    @Override
+    public void stop() {
+        // No subsystem shutdown required
     }
 
     // ═══════════════════════════════════════════════════════
@@ -90,8 +108,18 @@ public class LimelightTest extends OpMode {
     }
 
     private void emitTelemetry(double dt) {
-        telemetry.addData("Loop", "%.0f Hz", 1.0 / Math.max(dt, 1e-6));
-        telemetry.addData("Battery", "%.1fV (×%.2f)", batteryVoltage, NOMINAL_VOLTAGE / batteryVoltage);
+        telemetry.addData(
+                "Loop",
+                "%.0f Hz",
+                1.0 / Math.max(dt, 1e-6)
+        );
+
+        telemetry.addData(
+                "Battery",
+                "%.1fV (×%.2f)",
+                batteryVoltage,
+                NOMINAL_VOLTAGE / batteryVoltage
+        );
 
         drivetrain.addTelemetry(telemetry);
     }
