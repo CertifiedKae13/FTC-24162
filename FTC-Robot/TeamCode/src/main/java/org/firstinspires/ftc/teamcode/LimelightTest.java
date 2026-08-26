@@ -10,25 +10,11 @@ import com.qualcomm.robotcore.util.ElapsedTime;
 /*
  * ─── CONTROLS ────────────────────────────────────────────────
  * Left stick         Mecanum drive (forward / strafe)
- * Right stick        Chassis turn (X) — turret feed-forward compensates
- * L/R trigger        Manual turret rotation
- * A                  START launcher wheel (velocity set by D‑pad)
- * B                  STOP launcher wheel
- * B + R-bumper       Reverse intake
- * X                  Sort PURPLE ball to center (delayed for putter)
- * Y                  Sort GREEN ball to center (delayed for putter)
- * L-bumper           Rotate plate CW (immediate)
- * R-bumper           Rotate plate CCW (immediate)
- * D-pad up           Launcher EXTENDED (0.6) + speed -2500
- * D-pad down         Launcher RETRACTED (0.9) + speed -1500
- * D-pad left         Toggle intake
- * D-pad right        Shake plate
- * L/R stick click    Fire putter
- * Back               Toggle auto-tracking
+ * Right stick        Chassis turn (X)
  * ─────────────────────────────────────────────────────────────
  */
 
-@TeleOp(name = "MaOp v2")
+@TeleOp(name = "oPoP")
 public class LimelightTest extends OpMode {
 
     // ═══════════════════════════════════════════════════════
@@ -41,12 +27,6 @@ public class LimelightTest extends OpMode {
     // SUBSYSTEMS
     // ═══════════════════════════════════════════════════════
     private Drivetrain drivetrain;
-    private Intake intake;
-    private Putter putter;
-    private Launcher launcher;
-    private Plate plate;
-    private Turret turret;
-    private BallSensor ballSensor;
 
     // ═══════════════════════════════════════════════════════
     // STATE
@@ -67,12 +47,6 @@ public class LimelightTest extends OpMode {
         voltageSensor = hardwareMap.voltageSensor.iterator().next();
 
         drivetrain = new Drivetrain(hardwareMap);
-        intake     = new Intake(hardwareMap);
-        putter     = new Putter(hardwareMap);
-        launcher   = new Launcher(hardwareMap);
-        ballSensor = new BallSensor(hardwareMap);
-        plate      = new Plate(hardwareMap, ballSensor, putter);
-        turret     = new Turret(hardwareMap);
 
         telemetry.addLine("✓ All systems initialized");
         telemetry.update();
@@ -89,7 +63,6 @@ public class LimelightTest extends OpMode {
     // ═══════════════════════════════════════════════════════
     @Override
     public void start() {
-        turret.start();
         loopTimer.reset();
     }
 
@@ -103,20 +76,9 @@ public class LimelightTest extends OpMode {
         double voltageScale = NOMINAL_VOLTAGE / batteryVoltage;
 
         drivetrain.update(currGP, voltageScale);
-        intake.update(currGP, prevGP, voltageScale);
-        putter.update(currGP, prevGP);
-        launcher.update(currGP, prevGP);
-        plate.update(currGP, prevGP);
-        turret.update(currGP, prevGP, dt);
-        ballSensor.update();
 
         emitTelemetry(dt);
         telemetry.update();
-    }
-
-    @Override
-    public void stop() {
-        turret.stop();
     }
 
     // ═══════════════════════════════════════════════════════
@@ -131,10 +93,6 @@ public class LimelightTest extends OpMode {
         telemetry.addData("Loop", "%.0f Hz", 1.0 / Math.max(dt, 1e-6));
         telemetry.addData("Battery", "%.1fV (×%.2f)", batteryVoltage, NOMINAL_VOLTAGE / batteryVoltage);
 
-        turret.addTelemetry(telemetry);
-        ballSensor.addTelemetry(telemetry);
         drivetrain.addTelemetry(telemetry);
-        plate.addTelemetry(telemetry);
-        launcher.addTelemetry(telemetry);
     }
 }
