@@ -33,9 +33,9 @@ public class Drivetrain {
     }
 
     public void update(Gamepad gamepad, double voltageScale) {
-        fwd    = -cube(gamepad.left_stick_y);
-        strafe = cube(gamepad.left_stick_x) * STRAFE_SCALE;
-        turn   = cube(gamepad.right_stick_x);
+        fwd    = cube(gamepad.left_stick_y);
+        strafe = -cube(gamepad.left_stick_x) * STRAFE_SCALE;
+        turn   = -cube(gamepad.right_stick_x);
 
         double denom = Math.max(Math.abs(fwd) + Math.abs(strafe) + Math.abs(turn), 1.0);
 
