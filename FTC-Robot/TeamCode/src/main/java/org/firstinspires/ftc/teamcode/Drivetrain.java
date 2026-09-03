@@ -33,9 +33,25 @@ public class Drivetrain {
     }
 
     public void update(Gamepad gamepad, double voltageScale) {
-        fwd    = cube(gamepad.left_stick_y);
-        strafe = -cube(gamepad.left_stick_x) * STRAFE_SCALE;
-        turn   = -cube(gamepad.right_stick_x);
+        drive(
+                cube(gamepad.left_stick_y),
+                -cube(gamepad.left_stick_x) * STRAFE_SCALE,
+                -cube(gamepad.right_stick_x),
+                voltageScale
+        );
+    }
+
+    /**
+     * Apply raw robot-frame powers using the SAME mecanum mixing as teleop, so that
+     * autonomous movement matches the sticks exactly:
+     *   fwd    +1 → forward   (left stick up)
+     *   strafe +1 → left      (left stick left)
+     *   turn   +1 → rotate left (right stick left)
+     */
+    public void drive(double fwd, double strafe, double turn, double voltageScale) {
+        this.fwd = fwd;
+        this.strafe = strafe;
+        this.turn = turn;
 
         double denom = Math.max(Math.abs(fwd) + Math.abs(strafe) + Math.abs(turn), 1.0);
 
