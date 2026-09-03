@@ -2,10 +2,12 @@ package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.robotcore.util.Range;
 
+import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
@@ -64,6 +66,11 @@ public class Odometry {
     private static final double TURN_TIMEOUT_MS  = 3000;
     private static final double DRIVE_TIMEOUT_MS = 5000;
 
+    // Puzzle Key Control Steps
+    private static final double PUZZLE_X_STEP = 1.0;      // inches per press
+    private static final double PUZZLE_Y_STEP = 1.0;      // inches per press
+    private static final double PUZZLE_HEADING_STEP = 5.0; // degrees per press
+
     // ─────────────────────────────────────────────────────────
     // STATE
     // ─────────────────────────────────────────────────────────
@@ -73,6 +80,21 @@ public class Odometry {
 
     private Pose2D pose = new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.DEGREES, 0);
     private double voltageScale = 1.0;
+
+    // Puzzle Key State Variables
+    private double targetX = 0.0;
+    private double targetY = 0.0;
+    private double targetHeading = 0.0;
+    private boolean isNavigating = false;
+
+    // Button state tracking to prevent multiple actions per press
+    private boolean lastDPadUp = false;
+    private boolean lastDPadDown = false;
+    private boolean lastDPadLeft = false;
+    private boolean lastDPadRight = false;
+    private boolean lastYButton = false;
+    private boolean lastXButton = false;
+    private boolean lastBButton = false;
 
     public Odometry(HardwareMap hardwareMap, Drivetrain drivetrain) {
         this.drivetrain = drivetrain;
@@ -91,6 +113,12 @@ public class Odometry {
                 GoBildaPinpointDriver.EncoderDirection.FORWARD,
                 GoBildaPinpointDriver.EncoderDirection.FORWARD);
         pinpoint.resetPosAndIMU();   // zero position + recalibrate IMU (must be still!)
+        
+        // Initialize targets to current position
+        update();
+        targetX = getX();
+        targetY = getY();
+        targetHeading = getHeadingDeg();
     }
 
     /** Optional: scale motor power by battery voltage (like teleop). */
@@ -102,6 +130,9 @@ public class Odometry {
     public void reset() {
         pinpoint.resetPosAndIMU();
         update();
+        targetX = getX();
+        targetY = getY();
+        targetHeading = getHeadingDeg();
     }
 
     // ─────────────────────────────────────────────────────────
@@ -124,6 +155,152 @@ public class Odometry {
 
     public double getHeadingDeg() {
         return pose.getHeading(AngleUnit.DEGREES);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // PUZZLE KEY CONTROLS
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Call this method every loop in teleop to process D-pad and face button inputs.
+     * Updates target coordinates based on button presses.
+     */
+    public void processPuzzleKeys(Gamepad gamepad) {
+        // Update targets based on D-pad presses (only if not currently navigating)
+        if (!isNavigating) {
+            if (gamepad.dpad_up && !lastDPadUp) {
+                targetY += PUZZLE_Y_STEP;
+            }
+            if (gamepad.dpad_down && !lastDPadDown) {
+                targetY -= PUZZLE_Y_STEP;
+            }
+            if (gamepad.dpad_right && !lastDPadRight) {
+                targetX += PUZZLE_X_STEP;
+            }
+            if (gamepad.dpad_left && !lastDPadLeft) {
+                targetX -= PUZZLE_X_STEP;
+            }
+            
+            // Update target heading based on X and B presses
+            if (gamepad.x && !lastXButton) {
+                targetHeading -= PUZZLE_HEADING_STEP;
+            }
+            if (gamepad.b && !lastBButton) {
+                targetHeading += PUZZLE_HEADING_STEP;
+            }
+        }
+
+        // Check for Y button press to initiate navigation
+        if (gamepad.y && !lastYButton && !isNavigating) {
+            isNavigating = true;
+        }
+
+        // Update last button states
+        lastDPadUp = gamepad.dpad_up;
+        lastDPadDown = gamepad.dpad_down;
+        lastDPadLeft = gamepad.dpad_left;
+        lastDPadRight = gamepad.dpad_right;
+        lastYButton = gamepad.y;
+        lastXButton = gamepad.x;
+        lastBButton = gamepad.b;
+    }
+
+    /**
+     * Call this method after processPuzzleKeys() to execute navigation.
+     * Returns true when navigation is complete or timed out.
+     */
+    public boolean navigateToTarget(LinearOpMode opMode) {
+        if (!isNavigating) {
+            return true; // Not navigating, so we're "done"
+        }
+
+        // First, turn to the target heading
+        update();
+        double currentHeading = getHeadingDeg();
+        double headingError = wrapDeg(targetHeading - currentHeading);
+
+        if (Math.abs(headingError) > TURN_TOLERANCE_DEG) {
+            turnTo(opMode, headingError);
+        } else {
+            // Then move to the target position
+            update();
+            double currentX = getX();
+            double currentY = getY();
+            double distToTarget = Math.hypot(targetX - currentX, targetY - currentY);
+
+            if (distToTarget > DIST_TOLERANCE_IN) {
+                // Use driveTo to move to the target while maintaining the target heading
+                // We'll implement a custom version that maintains heading
+                driveToWithFixedHeading(opMode, targetX, targetY, targetHeading);
+            } else {
+                isNavigating = false;
+                drivetrain.drive(0, 0, 0, voltageScale);
+                return true; // Navigation complete
+            }
+        }
+        return false; // Still navigating
+    }
+
+    /**
+     * Drive to a specific location while trying to maintain a fixed heading.
+     * This is a modified version of driveTo that holds a specific heading.
+     */
+    private void driveToWithFixedHeading(LinearOpMode opMode, double targetX, double targetY, double desiredHeading) {
+        PID distPid = new PID(DIST_kP, DIST_kI, DIST_kD);
+        PID holdPid = new PID(HOLD_kP, HOLD_kI, HOLD_kD);
+        ElapsedTime timer = new ElapsedTime();
+
+        while (opMode.opModeIsActive() && timer.milliseconds() < DRIVE_TIMEOUT_MS) {
+            update();
+
+            double errX = targetX - getX();
+            double errY = targetY - getY();
+            double dist = Math.hypot(errX, errY);
+
+            if (dist < DIST_TOLERANCE_IN) break;
+
+            // Position loop → speed (P term: fast when far, slow when near).
+            double speed = Range.clip(distPid.calculate(dist), 0, DIST_MAX_SPEED);
+
+            // Field-frame direction toward the target.
+            double dirX = errX / dist;
+            double dirY = errY / dist;
+
+            // Rotate field-frame velocity into the robot frame using current heading.
+            double theta = Math.toRadians(getHeadingDeg());
+            double cos = Math.cos(theta);
+            double sin = Math.sin(theta);
+            double fwd    = speed * (dirX * cos + dirY * sin);
+            double strafe = speed * (-dirX * sin + dirY * cos);
+
+            // Heading hold → turn correction (keeps robot facing desiredHeading).
+            double headingErr = wrapDeg(desiredHeading - getHeadingDeg());
+            double turn = TURN_DIRECTION
+                    * Range.clip(holdPid.calculate(headingErr), -HOLD_MAX_POWER, HOLD_MAX_POWER);
+
+            drivetrain.drive(fwd, strafe, turn, voltageScale);
+        }
+        drivetrain.drive(0, 0, 0, voltageScale);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // GETTERS FOR TELEMETRY
+    // ─────────────────────────────────────────────────────────
+
+    public double getTargetX() {
+        return targetX;
+    }
+
+    public double getTargetY() {
+        return targetY;
+    }
+
+    public double getTargetHeading() {
+        return targetHeading;
+    }
+
+    public boolean isNavigatingToTarget() {
+        return isNavigating;
     }
 
     // ─────────────────────────────────────────────────────────
