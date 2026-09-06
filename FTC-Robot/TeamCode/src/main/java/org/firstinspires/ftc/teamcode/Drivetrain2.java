@@ -10,10 +10,10 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
  * Mecanum drivetrain for the updated MainTeleOP and Odometry classes.
  * Robot-frame drive convention: +forward, +strafe RIGHT, +turn CLOCKWISE.
  * Assumes the usual X roller arrangement viewed from above.
- * Verify motor directions on the actual chassis; left motors are reversed here.
+ * Verify motor directions on the actual chassis; right motors are reversed for this chassis.
  * Odometry maps Pinpoint's +left / +CCW into this interface with -1 signs.
  */
-public class Drivetrain {
+public class Drivetrain2 {
     private static final double STICK_DEADBAND = 0.10; // matches MainTeleOP
     private static final double STRAFE_SCALE = 1.1;    // manual input only
     private static final double MIN_VOLTAGE_SCALE = 0.80;
@@ -26,17 +26,17 @@ public class Drivetrain {
     private boolean saturated;
     private String status = "STOPPED";
 
-    public Drivetrain(HardwareMap hardwareMap) {
+    public Drivetrain2(HardwareMap hardwareMap) {
         frontLeft = hardwareMap.get(DcMotor.class, "frontLeft");
         frontRight = hardwareMap.get(DcMotor.class, "frontRight");
         backLeft = hardwareMap.get(DcMotor.class, "backLeft");
         backRight = hardwareMap.get(DcMotor.class, "backRight");
 
         stop();
-        frontLeft.setDirection(DcMotor.Direction.REVERSE);
-        backLeft.setDirection(DcMotor.Direction.REVERSE);
-        frontRight.setDirection(DcMotor.Direction.FORWARD);
-        backRight.setDirection(DcMotor.Direction.FORWARD);
+        frontLeft.setDirection(DcMotor.Direction.FORWARD);
+        backLeft.setDirection(DcMotor.Direction.FORWARD);
+        frontRight.setDirection(DcMotor.Direction.REVERSE);
+        backRight.setDirection(DcMotor.Direction.REVERSE);
         for (DcMotor motor : new DcMotor[]{frontLeft, frontRight, backLeft, backRight}) {
             motor.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
             // These controllers generate motor power, not encoder position targets.

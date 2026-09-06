@@ -7,390 +7,345 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.robotcore.util.Range;
 
+import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 
 /**
- * Odometry-based navigation built on the goBILDA Pinpoint (odometry pods + IMU),
- * wired to I2C bus 0.
+ * Odometry-based navigation helpers built on the goBILDA Pinpoint.
  *
- * POSITION uses a MAP frame, measured from where the robot stood when
- * resetPosAndIMU() ran:
- *     +X = right   (strafe right)
- *     +Y = forward (drive forward)
+ * UNITS: metres, degrees.
  *
- * This matches the puzzle-key display: press LEFT x5 and UP x4 → target (-50, +40).
+ * PINPOINT FRAME (fixed, cannot be changed):
+ *   +X = robot forward, +Y = robot LEFT, heading CCW-positive (0° = start heading).
  *
- * The Pinpoint's native field frame is different (+X = forward, +Y = left), so
- * readings are converted in getX()/getY() and again inside the drive math.
+ * The drivetrain's sign conventions are almost certainly different
+ * (gamepad style: +strafe = right, +turn = clockwise), so they are mapped
+ * with STRAFE_DIRECTION / TURN_DIRECTION below.  Verify these on the robot first.
  */
 public class Odometry {
 
     // ─────────────────────────────────────────────────────────
-    // TUNING CONSTANTS  (measure / tune these)
+    // TUNING CONSTANTS
     // ─────────────────────────────────────────────────────────
 
-    /*
-     * Distance calibration coefficient.
-     *
-     * The odometry reading can differ from the REAL distance the robot travels
-     * (wheel slip, pod misalignment, wheel diameter error, ...). Every odometry
-     * distance is multiplied by this so the READ distance equals the ACTUAL
-     * distance the robot drives:
-     *
-     *     coefficient = (actual distance driven) / (distance the odometry read)
-     *
-     * Example: you drive a known 100 cm but the odometry only reads 95 cm, then
-     * coefficient = 100 / 95 = 1.053. If it over-reads, use a value < 1.0.
-     */
-    private static final double DISTANCE_COEFFICIENT = 1.0;
+    /** Pod offsets from the robot's tracking point (mm).
+     *  X pod (forward encoder):  distance LEFT (+) / right (−) of centre.
+     *  Y pod (strafe encoder):   distance FORWARD (+) / back (−) of centre. */
+    private static final double POD_X_OFFSET_MM = -84.0;
+    private static final double POD_Y_OFFSET_MM = -168.0;
 
-    // Odometry pod offsets relative to the tracking point, in MM.
-    // TODO: measure your own robot. Left/forward of the tracking point are positive.
-    private static final double POD_X_OFFSET_MM  = -84.0;  // X (forward) pod sideways offset
-    private static final double POD_Y_OFFSET_MM  = -168.0; // Y (strafe) pod forward offset
+    /** Direction mapping between Pinpoint frame and Drivetrain.drive().
+     *  +1: drive()'s positive strafe = LEFT   (matches Pinpoint)   | −1: positive strafe = RIGHT (gamepad style)
+     *  +1: drive()'s positive turn   = CCW    (matches Pinpoint)   | −1: positive turn   = CW    (gamepad style)
+     *  If the robot drives AWAY from the target, flip the relevant sign. */
+    private static final double STRAFE_DIRECTION = -1.0;
+    private static final double TURN_DIRECTION   = -1.0;
 
-    // Turn PID (heading loop). Feedback in degrees, output in motor power.
+    // Turn PID (input: degrees)
     private static final double TURN_kP = 0.02;
     private static final double TURN_kI = 0.0;
-    private static final double TURN_kD = 0.01;
+    private static final double TURN_kD = 0.001;
     private static final double TURN_MAX_POWER     = 0.7;
+    private static final double TURN_MIN_POWER     = 0.10;   // overcome static friction
     private static final double TURN_TOLERANCE_DEG = 2.0;
 
-    // Drive PID (distance loop). Feedback in cm, output in motor power.
-    private static final double DIST_kP = 0.02;
+    // Drive PID (input: metres).
+    // Numerically larger than an inch-based gain because 1 m of error is 39.37× bigger than 1 in.
+    private static final double DIST_kP = 0.8;
     private static final double DIST_kI = 0.0;
     private static final double DIST_kD = 0.0;
-    private static final double DIST_MAX_SPEED    = 0.8;
-    private static final double DIST_TOLERANCE_CM = 2.5;   // ~1 inch
+    private static final double DIST_MAX_SPEED   = 0.6;
+    private static final double DIST_MIN_SPEED   = 0.12;    // overcome static friction
+    private static final double DIST_TOLERANCE_M = 0.015;   // 1.5 cm – must be < PUZZLE_STEP_M
 
-    // Heading-hold PID (keeps heading constant while drifting).
+    // Heading hold while driving
     private static final double HOLD_kP = 0.03;
     private static final double HOLD_kI = 0.0;
     private static final double HOLD_kD = 0.0;
     private static final double HOLD_MAX_POWER = 0.5;
 
-    /*
-     * Turning sign. Teleop maps right-stick-left → turn = +1 (rotate left).
-     * If turnTo(negative) rotates RIGHT instead of left (or vice-versa),
-     * flip this to -1.
-     */
-    private static final double TURN_DIRECTION = 1.0;
-
-    // Safety timeouts (ms) so a stuck loop can never run forever.
+    // Timeouts
     private static final double TURN_TIMEOUT_MS  = 3000;
     private static final double DRIVE_TIMEOUT_MS = 5000;
 
-    // Puzzle Key Control Steps
-    private static final double PUZZLE_X_STEP = 10.0;  // cm per d-pad press
-    private static final double PUZZLE_Y_STEP = 10.0;  // cm per d-pad press
-    private static final double PUZZLE_HEADING_STEP = 5.0; // degrees per press
+    // Puzzle-key steps
+    private static final double PUZZLE_STEP_M        = 0.0254;  // 1 inch
+    private static final double PUZZLE_HEADING_STEP  = 5.0;
 
     // ─────────────────────────────────────────────────────────
     // STATE
     // ─────────────────────────────────────────────────────────
 
+    private enum NavState { IDLE, TURNING, DRIVING }
+
     private final GoBildaPinpointDriver pinpoint;
-    private final Drivetrain drivetrain;
+    private Drivetrain drivetrain;                       // not final: settable
 
-    private Pose2D pose = new Pose2D(DistanceUnit.CM, 0, 0, AngleUnit.DEGREES, 0);
-    private double voltageScale = 1.0;
+    private Pose2D pose = new Pose2D(DistanceUnit.METER, 0, 0, AngleUnit.DEGREES, 0);
 
-    // Puzzle Key State Variables (targets in the MAP frame).
     private double targetX = 0.0;
     private double targetY = 0.0;
     private double targetHeading = 0.0;
-    private boolean isTurning = false;
-    private boolean isDriving = false;
 
-    // Button state tracking to prevent multiple actions per press.
-    private boolean lastDPadUp = false;
-    private boolean lastDPadDown = false;
-    private boolean lastDPadLeft = false;
-    private boolean lastDPadRight = false;
-    private boolean lastAButton = false;
-    private boolean lastYButton = false;
-    private boolean lastXButton = false;
-    private boolean lastBButton = false;
+    private NavState navState = NavState.IDLE;
+    private String lastResult = "—";
+    private double navHoldHeading = 0.0;
 
-    public Odometry(HardwareMap hardwareMap, Drivetrain drivetrain) {
-        this.drivetrain = drivetrain;
-        this.pinpoint = hardwareMap.get(GoBildaPinpointDriver.class, "pinpoint");
+    private final ElapsedTime navTimer = new ElapsedTime();
+    private final PID turnPid = new PID(TURN_kP, TURN_kI, TURN_kD);
+    private final PID distPid = new PID(DIST_kP, DIST_kI, DIST_kD);
+    private final PID holdPid = new PID(HOLD_kP, HOLD_kI, HOLD_kD);
+
+    // ─────────────────────────────────────────────────────────
+    // CONSTRUCTION / SETUP
+    // ─────────────────────────────────────────────────────────
+
+    public Odometry(HardwareMap hardwareMap) {
+        this(hardwareMap, null);
     }
 
-    // ─────────────────────────────────────────────────────────
-    // SETUP
-    // ─────────────────────────────────────────────────────────
+    public Odometry(HardwareMap hardwareMap, Drivetrain drivetrain) {
+        this.pinpoint = hardwareMap.get(GoBildaPinpointDriver.class, "pinpoint");
+        this.drivetrain = drivetrain;
+    }
 
-    /** Call once in init(), BEFORE waitForStart(). Robot must be stationary. */
+    public void setDrivetrain(Drivetrain drivetrain) {
+        this.drivetrain = drivetrain;
+    }
+
+    /** Call once in init(). Robot must be stationary (IMU calibrates). */
     public void init() {
+        stopDrive();
         pinpoint.setOffsets(POD_X_OFFSET_MM, POD_Y_OFFSET_MM, DistanceUnit.MM);
         pinpoint.setEncoderResolution(GoBildaPinpointDriver.GoBildaOdometryPods.goBILDA_4_BAR_POD);
+        // Verify: X pod must count UP when robot moves forward, Y pod UP when robot moves LEFT.
         pinpoint.setEncoderDirections(
                 GoBildaPinpointDriver.EncoderDirection.FORWARD,
                 GoBildaPinpointDriver.EncoderDirection.FORWARD);
-        pinpoint.resetPosAndIMU();   // zero position + recalibrate IMU (must be still!)
+        pinpoint.resetPosAndIMU();
 
-        // Initialize targets to current position.
         update();
-        targetX = getX();
-        targetY = getY();
-        targetHeading = getHeadingDeg();
+        syncTargetsToPose();
     }
 
-    /** Optional: scale motor power by battery voltage (like teleop). */
-    public void setVoltageScale(double scale) {
-        voltageScale = scale;
-    }
-
-    /** Re-zero position + heading. Call while stationary (e.g. start of auton). */
+    /** Zero the pose and recalibrate the IMU. Robot must be stationary. */
     public void reset() {
+        cancelNavigation();
         pinpoint.resetPosAndIMU();
         update();
-        targetX = getX();
-        targetY = getY();
-        targetHeading = getHeadingDeg();
+        syncTargetsToPose();
     }
 
     // ─────────────────────────────────────────────────────────
-    // READINGS
+    // READINGS  (call update() exactly once per loop)
     // ─────────────────────────────────────────────────────────
 
-    /** Must be called once per loop iteration before reading. */
     public void update() {
         pinpoint.update();
         pose = pinpoint.getPosition();
     }
 
-    /** MAP-frame X position in cm: + = right. */
-    public double getX() {
-        // Pinpoint +Y = left, so right = -pinpointY.
-        return -pose.getY(DistanceUnit.CM) * DISTANCE_COEFFICIENT;
+    public double getX()          { return pose.getX(DistanceUnit.METER); }
+    public double getY()          { return pose.getY(DistanceUnit.METER); }
+    public double getHeadingDeg() { return pose.getHeading(AngleUnit.DEGREES); }
+    public String getStatus()     { return String.valueOf(pinpoint.getDeviceStatus()); }
+
+    // ─────────────────────────────────────────────────────────
+    // PUZZLE-KEY CONTROLS  (all arguments are rising-edge "pressed" events)
+    // ─────────────────────────────────────────────────────────
+
+    public void processInputs(boolean upPressed, boolean downPressed,
+                              boolean leftPressed, boolean rightPressed,
+                              boolean xPressed, boolean bPressed, boolean yPressed) {
+
+        if (!isNavigating()) {
+            if (upPressed)    targetY += PUZZLE_STEP_M;
+            if (downPressed)  targetY -= PUZZLE_STEP_M;
+            if (rightPressed) targetX += PUZZLE_STEP_M;
+            if (leftPressed)  targetX -= PUZZLE_STEP_M;
+            if (xPressed)     targetHeading = wrapDeg(targetHeading - PUZZLE_HEADING_STEP);
+            if (bPressed)     targetHeading = wrapDeg(targetHeading + PUZZLE_HEADING_STEP);
+
+            if (yPressed) startNavigation();
+        }
     }
 
-    /** MAP-frame Y position in cm: + = forward. */
-    public double getY() {
-        // Pinpoint +X = forward.
-        return pose.getX(DistanceUnit.CM) * DISTANCE_COEFFICIENT;
+    public void startNavigation() {
+        if (drivetrain == null) {
+            lastResult = "NO DRIVETRAIN";
+            return;
+        }
+        navState = NavState.TURNING;   // always turn first
+        lastResult = "RUNNING";
+        navTimer.reset();
+        turnPid.reset();
+        distPid.reset();
+        holdPid.reset();
     }
 
-    public double getHeadingDeg() {
-        return pose.getHeading(AngleUnit.DEGREES);
+    public void cancelNavigation() {
+        if (isNavigating()) {
+            lastResult = "CANCELLED";
+            navState = NavState.IDLE;
+        }
+    }
+
+    /** Make the current pose the target (so the next D-pad step is relative to here). */
+    public void syncTargetsToPose() {
+        targetX = getX();
+        targetY = getY();
+        targetHeading = wrapDeg(getHeadingDeg());
     }
 
     // ─────────────────────────────────────────────────────────
-    // PUZZLE KEY CONTROLS
+    // NON-BLOCKING NAVIGATION  (call every loop; update() must already have been called)
     // ─────────────────────────────────────────────────────────
 
     /**
-     * Call this every loop in teleop to process D-pad and face buttons.
-     *
-     *   D-pad  → builds a target position (MAP frame: right=+X, forward=+Y)
-     *   X / B  → nudge target heading  (X = left 5°, B = right 5°)
-     *   A      → execute the turn to targetHeading
-     *   Y      → drive to (targetX, targetY)
+     * Executes one navigation step.
+     * @return true if idle/finished (caller should hold motors at zero), false if still moving.
      */
-    public void processPuzzleKeys(Gamepad gamepad) {
-        // Only edit the target while the robot is NOT navigating.
-        if (!isTurning && !isDriving) {
-            if (gamepad.dpad_up && !lastDPadUp)         targetY += PUZZLE_Y_STEP;   // forward
-            if (gamepad.dpad_down && !lastDPadDown)     targetY -= PUZZLE_Y_STEP;   // backward
-            if (gamepad.dpad_left && !lastDPadLeft)     targetX -= PUZZLE_X_STEP;   // left
-            if (gamepad.dpad_right && !lastDPadRight)   targetX += PUZZLE_X_STEP;   // right
+    public boolean updateNavigation(double voltageScale) {
+        if (navState == NavState.IDLE) return true;
 
-            if (gamepad.x && !lastXButton)              targetHeading -= PUZZLE_HEADING_STEP;
-            if (gamepad.b && !lastBButton)              targetHeading += PUZZLE_HEADING_STEP;
+        if (drivetrain == null) {          // safety: cannot move without a drivetrain
+            navState = NavState.IDLE;
+            lastResult = "NO DRIVETRAIN";
+            return true;
         }
 
-        // A = execute turn, Y = execute move (only start when idle).
-        if (gamepad.a && !lastAButton && !isTurning && !isDriving) isTurning = true;
-        if (gamepad.y && !lastYButton && !isTurning && !isDriving) isDriving = true;
-
-        // Remember button states for edge detection.
-        lastDPadUp = gamepad.dpad_up;
-        lastDPadDown = gamepad.dpad_down;
-        lastDPadLeft = gamepad.dpad_left;
-        lastDPadRight = gamepad.dpad_right;
-        lastAButton = gamepad.a;
-        lastYButton = gamepad.y;
-        lastXButton = gamepad.x;
-        lastBButton = gamepad.b;
-    }
-
-    /**
-     * Call this (instead of drivetrain.update) while navigating. Blocks until the
-     * requested turn or drive finishes (or times out).
-     */
-    public void navigateToTarget(LinearOpMode opMode) {
-        if (isTurning) {
-            turnToTarget(opMode);
-            isTurning = false;
-            drivetrain.drive(0, 0, 0, voltageScale);
-        } else if (isDriving) {
-            driveToTarget(opMode);
-            isDriving = false;
-            drivetrain.drive(0, 0, 0, voltageScale);
+        switch (navState) {
+            case TURNING: handleTurningPhase(voltageScale); break;
+            case DRIVING: handleDrivingPhase(voltageScale); break;
+            default: break;
         }
+        return navState == NavState.IDLE;
     }
 
-    private void turnToTarget(LinearOpMode opMode) {
-        update();
-        double error = wrapDeg(targetHeading - getHeadingDeg());
-        if (Math.abs(error) > TURN_TOLERANCE_DEG) {
-            turnTo(opMode, error);
-        }
+    private void beginDrivingPhase(double holdHeading) {
+        navState = NavState.DRIVING;
+        navHoldHeading = holdHeading;
+        navTimer.reset();
+        distPid.reset();
+        holdPid.reset();
     }
 
-    private void driveToTarget(LinearOpMode opMode) {
-        driveTo(opMode, targetX, targetY);
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // GETTERS FOR TELEMETRY
-    // ─────────────────────────────────────────────────────────
-
-    public double getTargetX() {
-        return targetX;
-    }
-
-    public double getTargetY() {
-        return targetY;
-    }
-
-    public double getTargetHeading() {
-        return targetHeading;
-    }
-
-    public boolean isNavigatingToTarget() {
-        return isTurning || isDriving;
-    }
-
-    /** Current calibration coefficient (for telemetry display). */
-    public double getDistanceCoefficient() {
-        return DISTANCE_COEFFICIENT;
-    }
-
-    // ─────────────────────────────────────────────────────────
-    // FUNCTION 1 — turnTo
-    // ─────────────────────────────────────────────────────────
-
-    /**
-     * Turn by a relative angle. Negative = left, positive = right.
-     * Blocks until the turn is complete (or times out).
-     */
-    public void turnTo(LinearOpMode opMode, double angleDeg) {
-        update();
-        double target = wrapDeg(getHeadingDeg() + angleDeg);
-
-        PID pid = new PID(TURN_kP, TURN_kI, TURN_kD);
-        ElapsedTime timer = new ElapsedTime();
-        int settled = 0;
-
-        while (opMode.opModeIsActive() && timer.milliseconds() < TURN_TIMEOUT_MS) {
-            update();
-            double error = wrapDeg(target - getHeadingDeg());
-            double turn = TURN_DIRECTION
-                    * Range.clip(pid.calculate(error), -TURN_MAX_POWER, TURN_MAX_POWER);
-
-            drivetrain.drive(0, 0, turn, voltageScale);
-
-            if (Math.abs(error) < TURN_TOLERANCE_DEG) {
-                settled++;
-                if (settled >= 5) break;   // stable for 5 consecutive frames
-            } else {
-                settled = 0;
-            }
-        }
+    private void finish(String result, double voltageScale) {
+        navState = NavState.IDLE;
+        lastResult = result;
         drivetrain.drive(0, 0, 0, voltageScale);
     }
 
-    // ─────────────────────────────────────────────────────────
-    // FUNCTION 2 — driveTo
-    // ─────────────────────────────────────────────────────────
+    private void handleTurningPhase(double voltageScale) {
+        double error = wrapDeg(targetHeading - getHeadingDeg());   // + = need CCW
 
-    /**
-     * Field-centric drift to (x, y) in the MAP frame, keeping the current heading
-     * constant. Distance PID gives "accelerate when far, decelerate when close";
-     * heading-hold PID stops the robot from rotating while strafing.
-     */
-    public void driveTo(LinearOpMode opMode, double targetX, double targetY) {
-        update();
-        double holdHeading = getHeadingDeg();
-
-        PID distPid = new PID(DIST_kP, DIST_kI, DIST_kD);
-        PID holdPid = new PID(HOLD_kP, HOLD_kI, HOLD_kD);
-        ElapsedTime timer = new ElapsedTime();
-
-        while (opMode.opModeIsActive() && timer.milliseconds() < DRIVE_TIMEOUT_MS) {
-            update();
-
-            double errX = targetX - getX();
-            double errY = targetY - getY();
-            double dist = Math.hypot(errX, errY);
-
-            if (dist < DIST_TOLERANCE_CM) break;
-
-            // Position loop → speed (P term: fast when far, slow when near).
-            double speed = Range.clip(distPid.calculate(dist), 0, DIST_MAX_SPEED);
-
-            // MAP-frame direction toward the target (right=+X, forward=+Y).
-            double dirX = errX / dist;
-            double dirY = errY / dist;
-
-            // Convert to the Pinpoint field frame (+X forward, +Y left).
-            double dirPX = dirY;    // map forward → pinpoint +X
-            double dirPY = -dirX;   // map right   → pinpoint -Y (left)
-
-            // Rotate field-frame velocity into the robot frame using current heading.
-            double theta = Math.toRadians(getHeadingDeg());
-            double cos = Math.cos(theta);
-            double sin = Math.sin(theta);
-            double fwd    = speed * (dirPX * cos + dirPY * sin);
-            double strafe = speed * (-dirPX * sin + dirPY * cos);
-
-            // Heading hold → turn correction (keeps robot facing holdHeading).
-            double headingErr = wrapDeg(holdHeading - getHeadingDeg());
-            double turn = TURN_DIRECTION
-                    * Range.clip(holdPid.calculate(headingErr), -HOLD_MAX_POWER, HOLD_MAX_POWER);
-
-            drivetrain.drive(fwd, strafe, turn, voltageScale);
+        if (Math.abs(error) < TURN_TOLERANCE_DEG) {
+            beginDrivingPhase(targetHeading);
+            return;
         }
-        drivetrain.drive(0, 0, 0, voltageScale);
+        if (navTimer.milliseconds() > TURN_TIMEOUT_MS) {
+            lastResult = "TURN TIMEOUT";
+            beginDrivingPhase(getHeadingDeg());   // hold whatever heading we reached
+            return;
+        }
+
+        double raw = turnPid.calculate(error);
+        double turn = Math.copySign(
+                Range.clip(Math.abs(raw), TURN_MIN_POWER, TURN_MAX_POWER), error);
+
+        drivetrain.drive(0, 0, TURN_DIRECTION * turn, voltageScale);
+    }
+
+    private void handleDrivingPhase(double voltageScale) {
+        double errX = targetX - getX();
+        double errY = targetY - getY();
+        double dist = Math.hypot(errX, errY);
+
+        if (dist < DIST_TOLERANCE_M) {
+            finish("ARRIVED", voltageScale);
+            return;
+        }
+        if (navTimer.milliseconds() > DRIVE_TIMEOUT_MS) {
+            finish("DRIVE TIMEOUT", voltageScale);
+            return;
+        }
+
+        // Speed magnitude (PID on distance, floored so we don't stall short of the target)
+        double speed = Range.clip(distPid.calculate(dist), DIST_MIN_SPEED, DIST_MAX_SPEED);
+        double dirX = errX / dist;
+        double dirY = errY / dist;
+
+        // Field frame → robot frame (rotate by −heading)
+        double theta = Math.toRadians(getHeadingDeg());
+        double cos = Math.cos(theta), sin = Math.sin(theta);
+        double robotFwd  = speed * ( dirX * cos + dirY * sin);   // +forward
+        double robotLeft = speed * (-dirX * sin + dirY * cos);   // +left (Pinpoint +Y)
+
+        // Heading hold
+        double headingErr = wrapDeg(navHoldHeading - getHeadingDeg());
+        double turn = Range.clip(holdPid.calculate(headingErr), -HOLD_MAX_POWER, HOLD_MAX_POWER);
+
+        drivetrain.drive(robotFwd,
+                         STRAFE_DIRECTION * robotLeft,
+                         TURN_DIRECTION * turn,
+                         voltageScale);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // GETTERS / TELEMETRY
+    // ─────────────────────────────────────────────────────────
+
+    public void adjustTargetX(double delta)       { targetX += delta; }
+    public void adjustTargetY(double delta)       { targetY += delta; }
+    public void adjustTargetHeading(double delta) { targetHeading = wrapDeg(targetHeading + delta); }
+
+    public double  getTargetX()       { return targetX; }
+    public double  getTargetY()       { return targetY; }
+    public double  getTargetHeading() { return targetHeading; }
+    public boolean isNavigating()     { return navState != NavState.IDLE; }
+
+    public void addTelemetry(Telemetry telemetry) {
+        telemetry.addLine("--- ODOMETRY (METRES) ---");
+        telemetry.addData("Pinpoint", getStatus());
+        telemetry.addData("Pos", "X %.3f  Y %.3f  H %.1f°", getX(), getY(), getHeadingDeg());
+        telemetry.addLine("--- TARGET ---");
+        telemetry.addData("Target", "X %.3f  Y %.3f  H %.1f°", targetX, targetY, targetHeading);
+        telemetry.addData("Error", "%.3f m  %.1f°",
+                Math.hypot(targetX - getX(), targetY - getY()),
+                wrapDeg(targetHeading - getHeadingDeg()));
+        telemetry.addData("Nav", "%s (%s)", navState, lastResult);
     }
 
     // ─────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────
 
-    /** Normalize an angle to [-180, 180] so turns always take the short way. */
-    private static double wrapDeg(double deg) {
-        while (deg > 180)  deg -= 360;
-        while (deg < -180) deg += 360;
-        return deg;
+    private void stopDrive() {
+        if (drivetrain != null) drivetrain.drive(0, 0, 0, 1.0);
     }
 
-    /** Minimal PID controller with basic integral anti-windup. */
+    private static double wrapDeg(double deg) {
+        return AngleUnit.normalizeDegrees(deg);   // → (−180, 180]
+    }
+
     private static class PID {
         private final double kP, kI, kD;
         private double integral = 0;
         private double prevError = 0;
-        private double prevTime = -1;
+        private long prevTimeNs = -1;
 
-        PID(double kP, double kI, double kD) {
-            this.kP = kP;
-            this.kI = kI;
-            this.kD = kD;
-        }
+        PID(double kP, double kI, double kD) { this.kP = kP; this.kI = kI; this.kD = kD; }
+
+        void reset() { integral = 0; prevError = 0; prevTimeNs = -1; }
 
         double calculate(double error) {
-            double now = System.nanoTime() / 1e9;
-            double dt = prevTime < 0 ? 0 : now - prevTime;
-            prevTime = now;
+            long now = System.nanoTime();
+            double dt = prevTimeNs < 0 ? 0 : (now - prevTimeNs) / 1e9;
+            prevTimeNs = now;
 
-            integral += error * dt;
-            integral = Range.clip(integral, -1.0, 1.0);   // anti-windup clamp
-
+            integral = Range.clip(integral + error * dt, -1.0, 1.0);   // anti-windup
             double derivative = dt > 1e-6 ? (error - prevError) / dt : 0;
             prevError = error;
 
