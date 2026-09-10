@@ -20,7 +20,10 @@ import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 * Motor power normalization and BRAKE zero-power behavior belong in Drivetrain.
 */
 public class Odometry2 {
-   // Preserve the measured offsets and hardware configuration from your file.
+   // UNVERIFIED hardware settings retained from the supplied code.
+   // These offsets also occur in the manufacturer example; measure your own robot.
+   // X offset: forward pod sideways position (+left). Y offset: lateral pod
+   // forward position (+forward). Both are in mm relative to the tracking point.
    private static final double POD_X_OFFSET_MM = -84.0;
    private static final double POD_Y_OFFSET_MM = -168.0;
    private static final double STRAFE_DIRECTION = -1.0;
@@ -35,7 +38,9 @@ public class Odometry2 {
    private static final double TURN_STATIC = 0.025;
    private static final double TURN_MAX_POWER = 0.30;
    private static final double HOLD_MAX_POWER = 0.25;
-   private static final double TURN_TOLERANCE_DEG = 2.0;
+   // Acceptance requirement, NOT a dead zone subtracted from proportional error.
+   // 0.5 deg is a starting requirement; verify sensor noise and achievable accuracy.
+   private static final double TURN_TOLERANCE_DEG = 0.5;
    private static final double DIST_KP = 0.8;
    private static final double DIST_KD = 0.15; // field velocity damping
    private static final double DIST_STATIC = 0.08;
@@ -84,7 +89,9 @@ public class Odometry2 {
    private double lastControlTime;
    private double commandX, commandY;
    private double turnCommand;
-   private double lastTurnCommandTime = -1.0;
+   private double turnEffort; // slew only the P + friction effort, never the D brake
+   private double controlDt, turnP, turnD, turnFeedforward, turnRaw;
+   private boolean turnClipped;
    private static final double TURN_SLEW_PER_S = 1.0;
 
 
@@ -191,7 +198,7 @@ public class Odometry2 {
    /** Exactly one Pinpoint poll. Estimate velocity from cached poses, no extra I2C reads. */
    public void update() {
        double now = clock.seconds();
-       double gap = lastSampleTime < 0 ? 0 : now - lastSampleTime;
+       double previousSampleTime = lastSampleTime;
        try {
            pinpoint.update();
            Pose2D next = pinpoint.getPosition();
@@ -206,7 +213,9 @@ public class Odometry2 {
        }
        lastSampleTime = clock.seconds();
        // Include time spent in the device read when checking a stalled control loop.
-       boolean longGap = gap > MAX_SAMPLE_GAP_S || lastSampleTime - now > MAX_SAMPLE_GAP_S;
+       boolean longGap = lastSampleTime - now > MAX_SAMPLE_GAP_S
+               || (previousSampleTime >= 0.0
+               && lastSampleTime - previousSampleTime > MAX_SAMPLE_GAP_S);
        if (!poseUsable() || longGap) {
            clearVelocity();
            resetStillSince = -1.0;
@@ -330,17 +339,19 @@ public class Odometry2 {
        double dt = now - lastControlTime;
        lastControlTime = now;
        if (drivetrain == null || !isReady() || !targetsFinite()
-               || !finite(voltageScale) || voltageScale <= 0.0 || dt > MAX_SAMPLE_GAP_S) {
+               || !finite(voltageScale) || voltageScale <= 0.0
+               || !finite(dt) || dt < 0.0 || dt > MAX_SAMPLE_GAP_S) {
            finish("NAVIGATION ABORTED: INVALID STATE / DATA");
            return true;
        }
-       if (navState == NavState.TURNING) handleTurning(now, voltageScale);
-       else handleDriving(now, Math.max(0.0, dt), voltageScale);
+       controlDt = dt;
+       if (navState == NavState.TURNING) handleTurning(now, dt, voltageScale);
+       else handleDriving(now, dt, voltageScale);
        return navState == NavState.IDLE;
    }
 
 
-   private void handleTurning(double now, double voltageScale) {
+   private void handleTurning(double now, double dt, double voltageScale) {
        if (now - phaseStarted > TURN_TIMEOUT_S) {
            finish("TURN TIMEOUT"); // never translate after a failed turn
            return;
@@ -359,33 +370,40 @@ public class Odometry2 {
        }
        settledSince = -1.0;
        drivetrain.drive(0, 0, TURN_DIRECTION * turnPower(error, TURN_KP, TURN_KD,
-               TURN_MAX_POWER), voltageScale);
+               TURN_MAX_POWER, dt), voltageScale);
    }
 
 
-   private double turnPower(double error, double kp, double kd, double limit) {
-       // Measured velocity avoids angle-error wrap spikes and target-change derivative kick.
-       // Continuous dead zone: avoid a power step at the angle tolerance boundary.
-       double outsideTolerance = Math.max(0.0, Math.abs(error) - TURN_TOLERANCE_DEG);
-       double proportional = kp * Math.copySign(outsideTolerance, error);
-       double raw = proportional - kd * angularVelocity;
-       // Help break static friction only near rest, and never reverse a braking request.
+   private double turnPower(double error, double kp, double kd, double limit, double dt) {
+       // The full normalized error drives P. Tolerance is used ONLY for settling.
+       turnP = kp * error;
+       // Deg/s from wrapped pose differences: no target-change derivative kick.
+       turnD = -kd * angularVelocity;
+       turnFeedforward = 0.0;
+       double pd = turnP + turnD;
        if (Math.abs(error) > TURN_TOLERANCE_DEG && Math.abs(angularVelocity) < 8.0
-               && raw * error > 0.0) {
-           raw += Math.copySign(TURN_STATIC * Math.min(outsideTolerance / 8.0, 1.0), error);
+               && pd * error > 0.0) {
+           // Retained tapered friction model. This is NOT a guaranteed minimum
+           // usable motor power: measure breakaway power before changing it.
+           turnFeedforward = Math.copySign(
+                   TURN_STATIC * Math.min(Math.abs(error) / 8.0, 1.0), error);
        }
-       // Limit acceleration in both turn-only navigation and heading hold.
-       double now = clock.seconds();
-       double dt = lastTurnCommandTime < 0.0 ? 0.0
-               : Range.clip(now - lastTurnCommandTime, 0.0, 0.05);
-       lastTurnCommandTime = now;
-       double requested = Range.clip(raw, -limit, limit);
-       double step = TURN_SLEW_PER_S * dt;
-       turnCommand = Range.clip(turnCommand + Range.clip(requested - turnCommand, -step, step),
-               -limit, limit);
+       double desiredEffort = Range.clip(turnP + turnFeedforward, -limit, limit);
+       // Remove obsolete effort immediately when the target correction reverses.
+       if (desiredEffort * turnEffort < 0.0) turnEffort = 0.0;
+       if (Math.abs(desiredEffort) <= Math.abs(turnEffort)) {
+           turnEffort = desiredEffort; // do not delay reducing propulsion
+       } else {
+           double step = TURN_SLEW_PER_S * Math.min(dt, 0.05);
+           turnEffort += Range.clip(desiredEffort - turnEffort, -step, step);
+       }
+       // Apply velocity damping AFTER the propulsion slew limiter so braking
+       // can take effect on this control update, even while propulsion ramps.
+       turnRaw = turnEffort + turnD;
+       turnCommand = Range.clip(turnRaw, -limit, limit);
+       turnClipped = Math.abs(turnRaw) > limit;
        return turnCommand;
    }
-
 
    private void handleDriving(double now, double dt, double voltageScale) {
        if (now - phaseStarted > DRIVE_TIMEOUT_S) {
@@ -430,7 +448,7 @@ public class Odometry2 {
        double theta = Math.toRadians(getHeadingDeg());
        double forward = commandX * Math.cos(theta) + commandY * Math.sin(theta);
        double left = -commandX * Math.sin(theta) + commandY * Math.cos(theta);
-       double turn = turnPower(headingError, HOLD_KP, HOLD_KD, HOLD_MAX_POWER);
+       double turn = turnPower(headingError, HOLD_KP, HOLD_KD, HOLD_MAX_POWER, dt);
        drivetrain.drive(forward, STRAFE_DIRECTION * left, TURN_DIRECTION * turn, voltageScale);
    }
 
@@ -445,8 +463,9 @@ public class Odometry2 {
 
 
    private void stopDrive() {
-       turnCommand = 0.0;
-       lastTurnCommandTime = clock.seconds();
+       turnCommand = turnEffort = 0.0;
+       turnP = turnD = turnFeedforward = turnRaw = 0.0;
+       turnClipped = false;
        if (drivetrain != null) drivetrain.drive(0, 0, 0, 1.0);
    }
 
@@ -474,6 +493,9 @@ public class Odometry2 {
    public double getTargetY() { return targetY; }
    public double getTargetHeading() { return targetHeading; }
    public String getStatus() { return status; }
+   public String getLastResult() { return lastResult; }
+   /** Historical result of the last operation, not a live check of the current pose. */
+   public boolean hasArrived() { return navState == NavState.IDLE && "ARRIVED".equals(lastResult); }
    public boolean isNavigating() { return navState != NavState.IDLE; }
 
 
@@ -488,6 +510,15 @@ public class Odometry2 {
                Math.hypot(velocityX, velocityY), angularVelocity, motionUsable() ? "valid" : "unavailable");
        telemetry.addData("Navigation", "%s / %s", navState, lastResult);
        telemetry.addData("Reset", resetState);
+       telemetry.addData("Turn P / D / FF", "%.4f / %.4f / %.4f", turnP, turnD, turnFeedforward);
+       telemetry.addData("Turn effort / raw / CCW out", "%.4f / %.4f / %.4f",
+               turnEffort, turnRaw, turnCommand);
+       telemetry.addData("Turn clipped / control dt", "%s / %.4f s", turnClipped, controlDt);
+       telemetry.addData("Velocity age", "%.3f s",
+               velocityTime < 0 ? -1.0 : clock.seconds() - velocityTime);
+       telemetry.addData("Heading acceptance", "%.2f deg", TURN_TOLERANCE_DEG);
+       telemetry.addData("Hardware settings", "VERIFY offsets %.1f / %.1f mm; 4-bar; FWD/FWD",
+               POD_X_OFFSET_MM, POD_Y_OFFSET_MM);
    }
 
 
