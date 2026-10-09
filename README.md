@@ -1,6 +1,6 @@
-# FTC-24162-Coders
+# FTC-24162-Coding-Team
 # - Kaeden
-# - Aly
-# - Lucas
-# - Ritu
 # - Rishaan
+# - Lucas
+# - Aly
+# - Ritu
