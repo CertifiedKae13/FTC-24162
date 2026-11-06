@@ -42,7 +42,7 @@ public class MainTeleOP2 extends OpMode {
     private static final double LAUNCH2_SIGN = 1.0;      // flip to -1.0 if launch2 spins the wrong way
     private static final double TRIGGER_DEADBAND = 0.05;
     private static final double BATTERY_INTERVAL_S = 0.20;
-    private static final double TELEMETRY_INTERVAL_S = 0.10;
+    private static final double TELEMETRY_INTERVAL_S = 0.20;
     private Drivetrain2 drivetrain;
     private DcMotor intake, launch1, launch2;
     private int intakeState;   // +1 in, -1 out, 0 off (toggled by A / LB)
@@ -91,7 +91,7 @@ public class MainTeleOP2 extends OpMode {
         odometry = new Odometry2(hardwareMap, drivetrain);
         odometry.init();
         telemetryCapture = new TelemetryCapture2();
-        telemetry.setMsTransmissionInterval(100);
+        telemetry.setMsTransmissionInterval(200);
         sendTelemetry(true);
     }
 

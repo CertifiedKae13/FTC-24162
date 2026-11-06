@@ -49,6 +49,12 @@ public class Odometry2 {
    // nearWindowS instead of the normal 1.25 s / 1.0 s. Off (-1) by default, so TeleOp is unchanged.
    private double nearWindowS = -1, nearDistIn = 0, nearHeadDeg = 0;
    private static final double TURN_SLEW_PER_S = 3.5;  // was 1.0
+   // Near-target integral overcomes a persistent small error without a power jump.
+   // Starting values; tune on the actual robot.
+   private static final double TURN_KI = 0.012; // power / (degree * second)
+   private static final double TURN_I_MAX = 0.10; // maximum integral contribution
+   private static final double TURN_I_ZONE_DEG = 12.0;
+   private static final double TURN_I_MAX_RATE_DPS = 12.0;
    private static final double TURN_MAX_POWER = 0.55;  // was 0.30
    private static final double HOLD_MAX_POWER = 0.45;  // was 0.25
    // Acceptance requirement, NOT a dead zone subtracted from proportional error.
@@ -156,7 +162,8 @@ public class Odometry2 {
    private double lastControlTime;
    private double commandX, commandY;
    private double turnCommand;
-   private double turnEffort; // slew only the P + friction effort, never the D brake
+   private double turnEffort; // slew only the P + I + friction effort, never the D brake
+   private double turnIntegralPower;
    private double controlDt, turnP, turnD, turnFeedforward, turnRaw;
    private boolean turnClipped;
 
@@ -751,7 +758,25 @@ public class Odometry2 {
            turnFeedforward = Math.copySign(
                    turnStatic * Math.min(Math.abs(error) / turnStaticTaperDeg, 1.0), error);
        }
-       double desiredEffort = Range.clip(turnP + turnFeedforward, -limit, limit);
+       // Clear stored effort when it could drive past the target. Integrate only
+       // close to the target and at low angular speed, with conditional anti-windup.
+       if (Math.abs(error) <= TURN_TOLERANCE_DEG
+               || Math.abs(error) > TURN_I_ZONE_DEG || turnIntegralPower * error < 0.0) {
+           turnIntegralPower = 0.0;
+       }
+       if (Math.abs(error) > TURN_TOLERANCE_DEG
+               && Math.abs(error) <= TURN_I_ZONE_DEG
+               && Math.abs(angularVelocity) <= TURN_I_MAX_RATE_DPS) {
+           double candidate = Range.clip(turnIntegralPower
+                   + TURN_KI * error * Math.min(dt, 0.05), -TURN_I_MAX, TURN_I_MAX);
+           double candidateOutput = turnP + turnFeedforward + candidate + turnD;
+           // Do not accumulate further into the output limit.
+           if (Math.abs(candidateOutput) <= limit || candidateOutput * error < 0.0) {
+               turnIntegralPower = candidate;
+           }
+       }
+       double desiredEffort = Range.clip(turnP + turnIntegralPower + turnFeedforward,
+               -limit, limit);
        // Remove obsolete effort immediately when the target correction reverses.
        if (desiredEffort * turnEffort < 0.0) turnEffort = 0.0;
        if (Math.abs(desiredEffort) <= Math.abs(turnEffort)) {
@@ -867,7 +892,7 @@ public class Odometry2 {
 
 
    private void stopDrive() {
-       turnCommand = turnEffort = 0.0;
+       turnCommand = turnEffort = turnIntegralPower = 0.0;
        turnP = turnD = turnFeedforward = turnRaw = turnBrake = 0.0;
        turnClipped = false;
        if (drivetrain != null) drivetrain.drive(0, 0, 0, 1.0);
@@ -938,7 +963,8 @@ public class Odometry2 {
                Math.hypot(velocityX, velocityY), angularVelocity, motionUsable() ? "valid" : "unavailable");
        telemetry.addData("Navigation", "%s / %s", navState, lastResult);
        telemetry.addData("Reset", resetState);
-       telemetry.addData("Turn P / D / FF", "%.4f / %.4f / %.4f", turnP, turnD, turnFeedforward);
+       telemetry.addData("Turn P / I / D / FF", "%.4f / %.4f / %.4f / %.4f",
+               turnP, turnIntegralPower, turnD, turnFeedforward);
        telemetry.addData("Turn effort / raw / CCW out", "%.4f / %.4f / %.4f",
                turnEffort, turnRaw, turnCommand);
        telemetry.addData("Turn clipped / control dt", "%s / %.4f s", turnClipped, controlDt);
