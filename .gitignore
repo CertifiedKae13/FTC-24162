@@ -7,3 +7,9 @@ local.properties
 .DS_Store
 *.apk
 *.aar
+
+# Local-only files (never publish)
+FTC-Robot.backup-*/
+**/.last-deployed-apk.md5
+**/__pycache__/
+FTC-Robot/Compilation

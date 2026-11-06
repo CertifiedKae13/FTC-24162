@@ -20,8 +20,8 @@ import com.qualcomm.robotcore.util.Range;
  * (Touching any stick cancels an active navigation)
  *
  * ODOMETRY (sticks neutral)
- * D-Pad Up/Down    → Target Y  ± 0.0254 m (1 in)
- * D-Pad Left/Right → Target X  ± 0.0254 m (1 in)
+ * D-Pad Up/Down    → Target Y  ± 1 in
+ * D-Pad Left/Right → Target X  ± 1 in
  * X / B            → Target Heading −5° / +5°
  * Y                → Navigate to target (turn, then drive)
  * Left Bumper      → Snap target to current pose
@@ -193,9 +193,9 @@ public class MainTeleOP extends OpMode {
         drivetrain.addTelemetry(telemetry);
 
         telemetry.addLine();
-        telemetry.addData("Pos (X,Y) m", "(%.3f, %.3f)", odometry.getX(), odometry.getY());
+        telemetry.addData("Pos (X,Y) in, field", "(%.3f, %.3f)", odometry.getX(), odometry.getY());
         telemetry.addData("Heading deg", "%.1f", odometry.getHeadingDeg());
-        telemetry.addData("Target (X,Y) m", "(%.3f, %.3f)", odometry.getTargetX(), odometry.getTargetY());
+        telemetry.addData("Target (X,Y) in, field", "(%.3f, %.3f)", odometry.getTargetX(), odometry.getTargetY());
         telemetry.addData("Target Heading deg", "%.1f", odometry.getTargetHeading());
         telemetry.addData("Navigating", odometry.isNavigating() ? "YES" : "no");
 

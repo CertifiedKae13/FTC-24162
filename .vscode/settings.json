@@ -1,0 +1,20 @@
+{
+  // Save edits automatically, so what you see is what is on disk (and what gets committed).
+  "files.autoSave": "afterDelay",
+  // Notice changes made outside VS Code (other tools, git pull) and reload them.
+  "files.watcherExclude": { "**/build/**": true, "**/.gradle/**": true },
+  // Hide the old backup copy so you can't open its stale files by mistake.
+  "files.exclude": { "FTC-Robot.backup-*": true },
+  "search.exclude": { "FTC-Robot.backup-*": true, "**/build": true },
+  // Source Control: check GitHub for new commits every few minutes.
+  "git.autofetch": true,
+  "git.autofetchPeriod": 180,
+  // Commit with nothing staged = commit all changes. After every commit, pull + push ("sync").
+  "git.enableSmartCommit": true,
+  "git.smartCommitChanges": "all",
+  "git.postCommitCommand": "sync",
+  "git.confirmSync": false,
+  "git.pullBeforeCheckout": true,
+  // This repo pulls with rebase: stash uncommitted edits around a pull instead of refusing.
+  "git.autoStash": true
+}

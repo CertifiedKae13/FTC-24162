@@ -1,0 +1,3 @@
+biobuzz.png: BIOBUZZ field image by Team Juice 16236, shared with the FTC community and bundled in
+FTControl Panels (https://panels.bylazar.com, by bylazar.com / Lazar, team 19234). Credit as required by the
+FTControl License v1.0. Resized to 1024 px; drawn by PoseDisplay on the FTC Dashboard field view.

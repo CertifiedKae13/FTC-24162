@@ -15,7 +15,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 /**
  * Odometry-based navigation helpers built on the goBILDA Pinpoint.
  *
- * UNITS: metres, degrees.
+ * UNITS: inches, degrees. Field frame: origin at field center (see FieldStart).
  *
  * PINPOINT FRAME (fixed, cannot be changed):
  *   +X = robot forward, +Y = robot LEFT, heading CCW-positive (0° = start heading).
@@ -51,14 +51,13 @@ public class Odometry {
     private static final double TURN_MIN_POWER     = 0.10;   // overcome static friction
     private static final double TURN_TOLERANCE_DEG = 2.0;
 
-    // Drive PID (input: metres).
-    // Numerically larger than an inch-based gain because 1 m of error is 39.37× bigger than 1 in.
-    private static final double DIST_kP = 0.8;
+    // Drive PID (input: inches). Converted from the old per-metre gain (x 0.0254).
+    private static final double DIST_kP = 0.8 * 0.0254;
     private static final double DIST_kI = 0.0;
     private static final double DIST_kD = 0.0;
     private static final double DIST_MAX_SPEED   = 0.6;
     private static final double DIST_MIN_SPEED   = 0.12;    // overcome static friction
-    private static final double DIST_TOLERANCE_M = 0.015;   // 1.5 cm – must be < PUZZLE_STEP_M
+    private static final double DIST_TOLERANCE_IN = 0.015 / 0.0254;   // ~0.59 in – must be < PUZZLE_STEP_IN
 
     // Heading hold while driving
     private static final double HOLD_kP = 0.03;
@@ -71,7 +70,7 @@ public class Odometry {
     private static final double DRIVE_TIMEOUT_MS = 5000;
 
     // Puzzle-key steps
-    private static final double PUZZLE_STEP_M        = 0.0254;  // 1 inch
+    private static final double PUZZLE_STEP_IN       = 1.0;     // 1 inch
     private static final double PUZZLE_HEADING_STEP  = 5.0;
 
     // ─────────────────────────────────────────────────────────
@@ -83,7 +82,8 @@ public class Odometry {
     private final GoBildaPinpointDriver pinpoint;
     private Drivetrain drivetrain;                       // not final: settable
 
-    private Pose2D pose = new Pose2D(DistanceUnit.METER, 0, 0, AngleUnit.DEGREES, 0);
+    private boolean startPosePending = false;
+    private Pose2D pose = new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.DEGREES, 0);
 
     private double targetX = 0.0;
     private double targetY = 0.0;
@@ -123,8 +123,9 @@ public class Odometry {
         // Verify: X pod must count UP when robot moves forward, Y pod UP when robot moves LEFT.
         pinpoint.setEncoderDirections(
                 GoBildaPinpointDriver.EncoderDirection.FORWARD,
-                GoBildaPinpointDriver.EncoderDirection.FORWARD);
+                GoBildaPinpointDriver.EncoderDirection.REVERSED); // Y pod was counting down when moving left
         pinpoint.resetPosAndIMU();
+        startPosePending = true;
 
         update();
         syncTargetsToPose();
@@ -134,6 +135,7 @@ public class Odometry {
     public void reset() {
         cancelNavigation();
         pinpoint.resetPosAndIMU();
+        startPosePending = true;
         update();
         syncTargetsToPose();
     }
@@ -145,10 +147,19 @@ public class Odometry {
     public void update() {
         pinpoint.update();
         pose = pinpoint.getPosition();
+        // After a reset, move the zeroed Pinpoint to the field-relative start pose once it is READY.
+        if (startPosePending && pinpoint.getDeviceStatus() == GoBildaPinpointDriver.DeviceStatus.READY) {
+            Pose2D start = new Pose2D(DistanceUnit.INCH, FieldStart.X_IN, FieldStart.Y_IN,
+                    AngleUnit.DEGREES, FieldStart.HEADING_DEG);
+            pinpoint.setPosition(start);
+            pose = start;
+            startPosePending = false;
+            syncTargetsToPose();
+        }
     }
 
-    public double getX()          { return pose.getX(DistanceUnit.METER); }
-    public double getY()          { return pose.getY(DistanceUnit.METER); }
+    public double getX()          { return pose.getX(DistanceUnit.INCH); }
+    public double getY()          { return pose.getY(DistanceUnit.INCH); }
     public double getHeadingDeg() { return pose.getHeading(AngleUnit.DEGREES); }
     public String getStatus()     { return String.valueOf(pinpoint.getDeviceStatus()); }
 
@@ -161,10 +172,10 @@ public class Odometry {
                               boolean xPressed, boolean bPressed, boolean yPressed) {
 
         if (!isNavigating()) {
-            if (upPressed)    targetY += PUZZLE_STEP_M;
-            if (downPressed)  targetY -= PUZZLE_STEP_M;
-            if (rightPressed) targetX += PUZZLE_STEP_M;
-            if (leftPressed)  targetX -= PUZZLE_STEP_M;
+            if (upPressed)    targetY += PUZZLE_STEP_IN;
+            if (downPressed)  targetY -= PUZZLE_STEP_IN;
+            if (rightPressed) targetX += PUZZLE_STEP_IN;
+            if (leftPressed)  targetX -= PUZZLE_STEP_IN;
             if (xPressed)     targetHeading = wrapDeg(targetHeading - PUZZLE_HEADING_STEP);
             if (bPressed)     targetHeading = wrapDeg(targetHeading + PUZZLE_HEADING_STEP);
 
@@ -263,7 +274,7 @@ public class Odometry {
         double errY = targetY - getY();
         double dist = Math.hypot(errX, errY);
 
-        if (dist < DIST_TOLERANCE_M) {
+        if (dist < DIST_TOLERANCE_IN) {
             finish("ARRIVED", voltageScale);
             return;
         }
@@ -307,12 +318,12 @@ public class Odometry {
     public boolean isNavigating()     { return navState != NavState.IDLE; }
 
     public void addTelemetry(Telemetry telemetry) {
-        telemetry.addLine("--- ODOMETRY (METRES) ---");
+        telemetry.addLine("--- ODOMETRY (INCHES, FIELD) ---");
         telemetry.addData("Pinpoint", getStatus());
         telemetry.addData("Pos", "X %.3f  Y %.3f  H %.1f°", getX(), getY(), getHeadingDeg());
         telemetry.addLine("--- TARGET ---");
         telemetry.addData("Target", "X %.3f  Y %.3f  H %.1f°", targetX, targetY, targetHeading);
-        telemetry.addData("Error", "%.3f m  %.1f°",
+        telemetry.addData("Error", "%.3f in  %.1f°",
                 Math.hypot(targetX - getX(), targetY - getY()),
                 wrapDeg(targetHeading - getHeadingDeg()));
         telemetry.addData("Nav", "%s (%s)", navState, lastResult);
